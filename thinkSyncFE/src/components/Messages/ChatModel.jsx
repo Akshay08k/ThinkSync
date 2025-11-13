@@ -1,61 +1,90 @@
-import { useEffect, useState, useRef } from "react";
-import { io } from "socket.io-client";
+import {
+  useEffect,
+  useState,
+  useRef,
+  useMemo,
+  useCallback,
+} from "react";
 import api from "../../utils/axios";
 import { useAuth } from "../../contexts/AuthContext";
 import { log } from "../../utils/Logger.js";
 import { IoArrowBack, IoSend } from "react-icons/io5";
+import { useSocket } from "../../contexts/SocketContext";
 
 export default function ChatModal({ user, goBack, onMarkRead }) {
   const { user: currentUser } = useAuth();
+  const { socket } = useSocket();
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const messagesEndRef = useRef(null);
-  const socketRef = useRef(null);
-  const roomId = [user.id, currentUser.id].sort().join("_");
+  const roomId = useMemo(
+    () => [user.id, currentUser.id].sort().join("_"),
+    [user.id, currentUser.id]
+  );
+
+  const markConversationRead = useCallback(async () => {
+    try {
+      const response = await api.post(
+        `/messages/${user.id}/mark-read`,
+        {},
+        { withCredentials: true }
+      );
+      if (response.data?.rowsUpdated > 0) {
+        onMarkRead(user.id);
+      }
+    } catch (err) {
+      console.error("❌ Failed to mark messages as read:", err);
+    }
+  }, [user.id, onMarkRead]);
 
   // Scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Setup socket and listeners
   useEffect(() => {
-    const backendUrl =
-      import.meta.env.VITE_SOCKET_URL || "http://localhost:3000";
-    socketRef.current = io(backendUrl, {
-      withCredentials: true,
-      transports: ["websocket", "polling"], // Allow fallback to polling
-      path: "/socket.io",
-      reconnection: true,
-      reconnectionAttempts: 5,
-      reconnectionDelay: 1000,
-    });
+    if (!socket) return undefined;
 
-    socketRef.current.on("connect", () => {
-      log("✅ Socket connected (Chat):", socketRef.current.id);
-      socketRef.current.emit("joinRoom", roomId); // join after connect
-    });
+    log("✅ Socket ready (Chat):", socket.id);
+    socket.emit("joinRoom", roomId);
 
-    const handleReceiveMessage = (message) => {
+    const handleIncomingMessage = ({ message, roomId: incomingRoom }) => {
+      if (!message || incomingRoom !== roomId) return;
       log("💬 Message received:", message);
       setMessages((prev) =>
         prev.some((m) => m.id === message.id) ? prev : [...prev, message]
       );
+      if (message.senderId === user.id) {
+        onMarkRead(user.id);
+        markConversationRead();
+      }
     };
 
-    socketRef.current.on("receiveMessage", handleReceiveMessage);
+    const handleMessagesRead = ({ readerId, otherUserId }) => {
+      if (!readerId || !otherUserId) return;
+      const isConversationEvent =
+        (readerId === currentUser.id && otherUserId === user.id) ||
+        (readerId === user.id && otherUserId === currentUser.id);
+      if (!isConversationEvent) return;
 
-    socketRef.current.on("disconnect", (reason) => {
-      log("🔌 Socket disconnected (Chat):", reason);
-    });
+      if (readerId !== currentUser.id) {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.senderId === currentUser.id ? { ...msg, read: true } : msg
+          )
+        );
+      }
+    };
 
-    // Cleanup
+    socket.on("chat:message", handleIncomingMessage);
+    socket.on("chat:messages-read", handleMessagesRead);
+
     return () => {
-      socketRef.current.off("receiveMessage", handleReceiveMessage);
-      socketRef.current.emit("leaveRoom", roomId);
-      socketRef.current.disconnect();
+      socket.off("chat:message", handleIncomingMessage);
+      socket.off("chat:messages-read", handleMessagesRead);
+      socket.emit("leaveRoom", roomId);
     };
-  }, [roomId]);
+  }, [socket, roomId, user.id, currentUser.id, onMarkRead, markConversationRead]);
 
   // Fetch messages on load
   useEffect(() => {
@@ -75,20 +104,15 @@ export default function ChatModal({ user, goBack, onMarkRead }) {
         );
 
         // Mark read in backend
-        await api.post(
-          `/messages/${user.id}/mark-read`,
-          {},
-          { withCredentials: true }
-        );
-        onMarkRead(user.id);
+        await markConversationRead();
       } catch (err) {
         console.error("❌ Failed to fetch messages:", err);
       }
     };
     fetchMessages();
-  }, [user?.id]);
+  }, [user?.id, markConversationRead]);
 
-  const sendMessage = async () => {
+  const sendMessage = useCallback(async () => {
     if (!input.trim()) return;
 
     try {
@@ -97,13 +121,16 @@ export default function ChatModal({ user, goBack, onMarkRead }) {
         { receiverId: user.id, content: input },
         { withCredentials: true }
       );
-      // Emit through socket
-      socketRef.current.emit("sendMessage", { roomId, message: res.data });
+      setMessages((prev) =>
+        prev.some((m) => m.id === res.data.id)
+          ? prev
+          : [...prev, res.data]
+      );
       setInput("");
     } catch (err) {
       console.error("❌ Error sending message:", err);
     }
-  };
+  }, [input, user.id]);
 
   const formatTime = (date) =>
     new Date(date).toLocaleTimeString([], {
@@ -179,3 +206,5 @@ export default function ChatModal({ user, goBack, onMarkRead }) {
     </div>
   );
 }
+
+

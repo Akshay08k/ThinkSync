@@ -1,14 +1,14 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useAuth } from "../contexts/AuthContext";
 import api from "../utils/axios";
-import { io } from "socket.io-client";
 import { log } from "../utils/Logger.js";
+import { useSocket } from "../contexts/SocketContext";
 
 export function useNotifications() {
   const { user } = useAuth();
+  const { socket, isConnected } = useSocket();
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
-  const socketRef = useRef(null);
 
   // Fetch notifications once or on demand
   const fetchNotifications = useCallback(async () => {
@@ -29,54 +29,31 @@ export function useNotifications() {
   }, [user]);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user || !socket) return undefined;
 
-    // Disconnect any existing socket
-    if (socketRef.current) socketRef.current.disconnect();
-
-    // Create new socket with fallback to polling
-    const backendUrl =
-      import.meta.env.VITE_SOCKET_URL || "http://localhost:3000";
-    socketRef.current = io(backendUrl, {
-      withCredentials: true,
-      transports: ["websocket", "polling"], // Allow fallback to polling
-      path: "/socket.io",
-      reconnection: true,
-      reconnectionAttempts: 5,
-      reconnectionDelay: 1000,
-      timeout: 20000,
-    });
-
-    // Wait until connected, then register user
-    socketRef.current.on("connect", () => {
-      log("✅ Socket connected (Notifications):", socketRef.current.id);
-      socketRef.current.emit("registerUser", user.id);
-    });
-
-    socketRef.current.on("connect_error", (error) => {
-      console.error("❌ Socket connection error (Notifications):", error);
-    });
-
-    socketRef.current.on("newNotification", (notif) => {
+    const handleNewNotification = (notif) => {
       log("🔔 New notification:", notif);
       setNotifications((prev) => [notif, ...prev]);
-    });
-
-    socketRef.current.on("disconnect", (reason) => {
-      log("🔌 Socket disconnected (Notifications):", reason);
-    });
-
-    socketRef.current.on("error", (error) => {
-      console.error("❌ Socket error (Notifications):", error);
-    });
-
-    fetchNotifications();
-
-    // Cleanup
-    return () => {
-      socketRef.current?.disconnect();
     };
-  }, [user, fetchNotifications]);
+
+    socket.on("newNotification", handleNewNotification);
+
+    return () => {
+      socket.off("newNotification", handleNewNotification);
+    };
+  }, [socket, user]);
+
+  useEffect(() => {
+    if (!user) {
+      setNotifications([]);
+      setLoading(false);
+      return;
+    }
+    if (!socket) return;
+    if (isConnected) {
+      fetchNotifications();
+    }
+  }, [user, socket, isConnected, fetchNotifications]);
 
   const markAsRead = async (id) => {
     await api.post(`/notifications/${id}/read`);

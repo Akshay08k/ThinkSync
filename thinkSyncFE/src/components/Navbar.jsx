@@ -89,11 +89,9 @@ const Navbar = ({ isAuthenticated, setIsAuthenticated }) => {
                     <FaBrain className="text-3xl text-blue-600 dark:text-blue-400 animate-pulse" />
                   </div>
                 </motion.div>
-                <Link to={"/"}>
-                  <span className="text-xl bg-gradient-to-r from-blue-600 to-purple-600 dark:from-blue-400 dark:to-purple-400 bg-clip-text text-transparent">
-                    ThinkSync
-                  </span>
-                </Link>
+                <span className="text-xl bg-gradient-to-r from-blue-600 to-purple-600 dark:from-blue-400 dark:to-purple-400 bg-clip-text text-transparent">
+                  ThinkSync
+                </span>
               </Link>
             </motion.div>
 

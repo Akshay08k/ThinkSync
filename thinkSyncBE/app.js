@@ -23,8 +23,9 @@ import announcementRoutes from "./routes/announcement.routes.js";
 import { createServer } from "http";
 import { Server } from "socket.io";
 import fs from "fs";
-import { log } from "./utils/Logger.js";
 import path from "path";
+import { log } from "./utils/Logger.js";
+import { getUserRoomId } from "./utils/socketRooms.js";
 dotenv.config();
 
 // Create Express app
@@ -59,6 +60,8 @@ io.on("connection", (socket) => {
     if (userId) {
       userSocketMap[userId] = socket.id;
       socket.userId = userId;
+      const personalRoom = getUserRoomId(userId);
+      socket.join(personalRoom);
       log(`✅ User ${userId} registered with socket ${socket.id}`);
     }
   });
@@ -79,6 +82,11 @@ io.on("connection", (socket) => {
   socket.on("joinRoom", (roomId) => {
     socket.join(roomId);
     log(`📥 Socket ${socket.id} joined room: ${roomId}`);
+  });
+
+  socket.on("leaveRoom", (roomId) => {
+    socket.leave(roomId);
+    log(`📤 Socket ${socket.id} left room: ${roomId}`);
   });
 
   // Send a message in real-time

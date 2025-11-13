@@ -1,31 +1,132 @@
 import { prisma } from "../config/db.js";
+import { getDirectRoomId, getUserRoomId } from "../utils/socketRooms.js";
+
+const userSummarySelect = {
+  id: true,
+  username: true,
+  displayName: true,
+  details: {
+    select: {
+      avatar: true,
+      coverImage: true,
+      bio: true,
+      occupation: true,
+      location: true,
+      website: true,
+    },
+  },
+};
+
+const ensureConnection = async (userId, otherUserId) => {
+  const connection = await prisma.follows.findFirst({
+    where: {
+      OR: [
+        { followerId: userId, followingId: otherUserId },
+        { followerId: otherUserId, followingId: userId },
+      ],
+    },
+  });
+
+  return Boolean(connection);
+};
+
+const formatUserProfile = (user) => {
+  if (!user) return null;
+  const avatar = user.details?.avatar || null;
+  return {
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName || user.username,
+    details: user.details ? { ...user.details } : null,
+    avatar,
+    profileImage: avatar,
+  };
+};
+
+const buildConversationSummary = async (viewerId, otherUserId) => {
+  const [user, lastMessage, unreadCount] = await Promise.all([
+    prisma.user.findUnique({
+      where: { id: otherUserId },
+      select: userSummarySelect,
+    }),
+    prisma.message.findFirst({
+      where: {
+        OR: [
+          { senderId: viewerId, receiverId: otherUserId },
+          { senderId: otherUserId, receiverId: viewerId },
+        ],
+      },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.message.count({
+      where: {
+        senderId: otherUserId,
+        receiverId: viewerId,
+        read: false,
+      },
+    }),
+  ]);
+
+  if (!user || !lastMessage) return null;
+
+  return {
+    ...formatUserProfile(user),
+    lastMessage,
+    unreadCount,
+  };
+};
+
+const emitConversationUpdate = async (io, viewerId, otherUserId) => {
+  const conversation = await buildConversationSummary(viewerId, otherUserId);
+  if (!conversation) return;
+
+  io.to(getUserRoomId(viewerId)).emit("chat:conversation-updated", {
+    conversation,
+  });
+};
+
+const emitUnreadTotal = async (io, userId) => {
+  const count = await prisma.message.count({
+    where: { receiverId: userId, read: false },
+  });
+
+  io.to(getUserRoomId(userId)).emit("chat:unread-total", { count });
+};
 
 const sendMessage = (io) => async (req, res) => {
   try {
     const senderId = req.user.id;
     const { receiverId, content } = req.body;
 
-    const isConnected = await prisma.follows.findFirst({
-      where: {
-        OR: [
-          { followerId: senderId, followingId: receiverId },
-          { followerId: receiverId, followingId: senderId },
-        ],
-      },
-    });
+    if (!receiverId || !content?.trim()) {
+      return res.status(400).json({ message: "Invalid message payload" });
+    }
 
-    if (!isConnected) {
+    const canMessage = await ensureConnection(senderId, receiverId);
+
+    if (!canMessage) {
       return res
         .status(403)
         .json({ message: "You can only message your connections." });
     }
 
     const message = await prisma.message.create({
-      data: { senderId, receiverId, content, read: false },
+      data: {
+        senderId,
+        receiverId,
+        content: content.trim(),
+        read: false,
+      },
     });
 
-    const roomId = [senderId, receiverId].sort().join("_");
-    io.to(roomId).emit("receiveMessage", message);
+    const roomId = getDirectRoomId(senderId, receiverId);
+    io.to(roomId).emit("chat:message", { message, roomId });
+
+    await Promise.all([
+      emitConversationUpdate(io, senderId, receiverId),
+      emitConversationUpdate(io, receiverId, senderId),
+      emitUnreadTotal(io, receiverId),
+    ]);
 
     res.status(201).json(message);
   } catch (err) {
@@ -34,21 +135,14 @@ const sendMessage = (io) => async (req, res) => {
   }
 };
 
-const getMessages = async (req, res) => {
+const getMessages = (io) => async (req, res) => {
   try {
     const userId = req.user.id;
     const otherUserId = req.params.userId;
 
-    const isConnected = await prisma.follows.findFirst({
-      where: {
-        OR: [
-          { followerId: userId, followingId: otherUserId },
-          { followerId: otherUserId, followingId: userId },
-        ],
-      },
-    });
+    const canView = await ensureConnection(userId, otherUserId);
 
-    if (!isConnected) {
+    if (!canView) {
       return res
         .status(403)
         .json({ message: "You can only view messages with your connections." });
@@ -64,10 +158,22 @@ const getMessages = async (req, res) => {
       orderBy: { createdAt: "asc" },
     });
 
-    await prisma.message.updateMany({
-      where: { senderId: otherUserId, receiverId: userId, read: false },
+    const updateResult = await prisma.message.updateMany({
+      where: {
+        senderId: otherUserId,
+        receiverId: userId,
+        read: false,
+      },
       data: { read: true },
     });
+
+    if (updateResult.count > 0) {
+      await Promise.all([
+        emitConversationUpdate(io, userId, otherUserId),
+        emitConversationUpdate(io, otherUserId, userId),
+        emitUnreadTotal(io, userId),
+      ]);
+    }
 
     res.json(messages);
   } catch (err) {
@@ -76,55 +182,49 @@ const getMessages = async (req, res) => {
   }
 };
 
-const getRecentChats = async (req, res) => {
+const getRecentChats = (io) => async (req, res) => {
   try {
     const userId = req.user.id;
 
-    const allMessages = await prisma.message.findMany({
+    const participants = await prisma.message.findMany({
       where: { OR: [{ senderId: userId }, { receiverId: userId }] },
+      select: { senderId: true, receiverId: true },
       orderBy: { createdAt: "desc" },
     });
 
-    const chatMap = new Map();
+    const uniquePartnerIds = [];
+    const seen = new Set();
 
-    allMessages.forEach((msg) => {
-      const otherUserId =
-        msg.senderId === userId ? msg.receiverId : msg.senderId;
-      if (!chatMap.has(otherUserId)) {
-        chatMap.set(otherUserId, msg);
+    participants.forEach((entry) => {
+      const partnerId =
+        entry.senderId === userId ? entry.receiverId : entry.senderId;
+      if (!seen.has(partnerId)) {
+        seen.add(partnerId);
+        uniquePartnerIds.push(partnerId);
       }
     });
 
-    const recentChats = await Promise.all(
-      Array.from(chatMap.entries()).map(async ([otherUserId, lastMsg]) => {
-        const user = await prisma.user.findUnique({
-          where: { id: otherUserId },
-          omit: {
-            password: true,
-            email: true,
-            googleAccessToken: true,
-            googleRefreshToken: true,
-            googleId: true,
-          },
-        });
-
-        return { ...user, lastMessage: lastMsg };
-      })
+    const conversations = await Promise.all(
+      uniquePartnerIds.map((partnerId) =>
+        buildConversationSummary(userId, partnerId)
+      )
     );
 
-    recentChats.sort(
-      (a, b) =>
-        new Date(b.lastMessage.createdAt) - new Date(a.lastMessage.createdAt)
-    );
+    const filtered = conversations
+      .filter(Boolean)
+      .sort(
+        (a, b) =>
+          new Date(b.lastMessage.createdAt) - new Date(a.lastMessage.createdAt)
+      );
 
-    res.json(recentChats);
+    res.json(filtered);
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Failed to fetch recent chats" });
   }
 };
 
-const getUnreadCount = async (req, res) => {
+const getUnreadCount = (io) => async (req, res) => {
   try {
     const userId = req.user.id;
     const count = await prisma.message.count({
@@ -137,20 +237,41 @@ const getUnreadCount = async (req, res) => {
   }
 };
 
-const markMessagesRead = async (req, res) => {
+const markMessagesRead = (io) => async (req, res) => {
   try {
     const userId = req.user.id;
     const otherUserId = req.params.userId;
 
+    const canUpdate = await ensureConnection(userId, otherUserId);
+
+    if (!canUpdate) {
+      return res
+        .status(403)
+        .json({ message: "You can only update messages for connections." });
+    }
+
     const result = await prisma.message.updateMany({
       where: {
-        OR: [
-          { senderId: otherUserId, receiverId: userId, read: false },
-          { senderId: userId, receiverId: otherUserId, read: false },
-        ],
+        senderId: otherUserId,
+        receiverId: userId,
+        read: false,
       },
       data: { read: true },
     });
+
+    if (result.count > 0) {
+      await Promise.all([
+        emitConversationUpdate(io, userId, otherUserId),
+        emitConversationUpdate(io, otherUserId, userId),
+        emitUnreadTotal(io, userId),
+      ]);
+
+      const roomId = getDirectRoomId(userId, otherUserId);
+      io.to(roomId).emit("chat:messages-read", {
+        readerId: userId,
+        otherUserId,
+      });
+    }
 
     res.json({ message: "Messages marked as read", rowsUpdated: result.count });
   } catch (err) {
