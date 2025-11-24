@@ -12,9 +12,10 @@ export default defineConfig({
       registerType: "autoUpdate",
       includeAssets: ["favicon.svg", "favicon.ico"],
       manifest: {
-        name: "My React App",
-        short_name: "ReactApp",
-        description: "A React Vite PWA app",
+        name: "Thinksync",
+        short_name: "Thinksync",
+        description:
+          "A Platform for Syncing Thoughts, Amplifying Ideas, and Transforming the Future.",
         theme_color: "#ffffff",
         icons: [
           {
