@@ -241,4 +241,4 @@ git push origin feature/your-feature
 
 ---
 
-**Made with ❤️ by ThinkSync Team**
+This Project is Made By [Akshay Komale](https://github.com/akshay08k),[Rishi Balani](https://github.com/rishibalani3)
