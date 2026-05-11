@@ -6,6 +6,8 @@
 
 ## 🚀 Overview
 
+### description
+
 **ThinkSync** is a full-stack AI-driven ecosystem designed for seamless interaction between users, data, and machine intelligence.
 
 It’s composed of three powerful layers:
@@ -239,4 +241,4 @@ git push origin feature/your-feature
 
 ---
 
-**Made with ❤️ by ThinkSync Team**
+This Project is Made By [Akshay Komale](https://github.com/akshay08k),[Rishi Balani](https://github.com/rishibalani3)
