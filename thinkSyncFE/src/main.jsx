@@ -7,13 +7,10 @@ import { AuthProvider } from "./contexts/AuthContext.jsx";
 
 createRoot(document.getElementById("root")).render(
   <StrictMode>
-  
-        <h1 className="text-3xl font-bold underline">
-          Hello Who Are Visiting This Site From That Spam Mail
-          Please Avoid Clicking On Any Link In That Mail Because 
-          It was my resendAPI key which got hacked from somewhere
-          and mails were sended from that account 
-          Please avoid those mails</h1> 
-      
+    <DarkModeProvider>
+      <AuthProvider>
+        <App />
+      </AuthProvider>
+    </DarkModeProvider>
   </StrictMode>
 );
